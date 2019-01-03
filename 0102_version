@@ -1,0 +1,793 @@
+package com.example.e26ch_000.myapplication;
+
+import android.app.Activity;
+import android.content.BroadcastReceiver;
+import android.content.ComponentName;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.PowerManager;
+import android.util.Log;
+import android.view.View;
+import android.widget.Button;
+import android.widget.TextView;
+import android.widget.Toolbar;
+import android.widget.EditText;
+import android.os.AsyncTask;
+
+import java.util.List;
+import java.io.PrintWriter;
+import java.io.StringWriter;
+import java.lang.ref.WeakReference;
+import java.util.logging.LogRecord;
+
+import com.example.e26ch_000.myapplication.customize.ScenarioDefinitions;
+import com.example.e26ch_000.myapplication.util.VoiceUIVariableUtil;
+import com.example.e26ch_000.myapplication.util.VoiceUIManagerUtil;
+import com.example.e26ch_000.myapplication.util.VoiceUIVariableUtil.VoiceUIVariableListHelper;
+import jp.co.sharp.android.rb.projectormanager.ProjectorManagerServiceUtil;
+import jp.co.sharp.android.voiceui.VoiceUIManager;
+import jp.co.sharp.android.voiceui.VoiceUIVariable;
+import jp.co.sharp.android.rb.camera.FaceDetectionUtil;
+import jp.co.sharp.android.rb.camera.ShootMediaUtil;
+import jp.co.sharp.android.rb.rbdance.DanceUtil;
+import io.grpc.ManagedChannel;
+import io.grpc.ManagedChannelBuilder;
+import io.grpc.StatusRuntimeException;
+import io.grpc.robohon_message.RoBoHoNMessageGrpc;
+import io.grpc.robohon_message.desktop;
+import io.grpc.robohon_message.robohon;
+import com.example.e26ch_000.myapplication.customize.ScenarioDefinitions;
+
+public class MainActivity extends Activity implements MainActivityVoiceUIListener.MainActivityScenarioCallback {
+    public static final String TAG = MainActivity.class.getSimpleName();
+    boolean tf=false;
+    boolean flag=false;
+
+    /** 音声UI制御. */
+    private VoiceUIManager mVoiceUIManager = null;
+    /** 音声UIイベントリスナー. */
+    private MainActivityVoiceUIListener mMainActivityVoiceUIListener = null;
+    /** 音声UIの再起動イベント検知. */
+    private VoiceUIStartReceiver mVoiceUIStartReceiver = null;
+    /** ホームボタンイベント検知. */
+    private HomeEventReceiver mHomeEventReceiver;
+    /** プロジェクター状態変化イベント検知. */
+    private ProjectorEventReceiver mProjectorEventReceiver;
+    /** プロジェクタ照射中のWakelock. */
+    private android.os.PowerManager.WakeLock mWakelock;
+    /** 排他制御用. */
+    private Object mLock = new Object();
+    /** プロジェクタ照射状態. */
+    private boolean isProjected = false;
+    /** 顔認識結果通知Action定義. */
+    public static final String ACTION_RESULT_FACE_DETECTION = "com.example.e26ch_000.myapplication.action.RESULT_FACE_DETECTION";
+    /** 写真/動画撮影結果通知Action定義. */
+    public static final String ACTION_RESULT_TAKE_PICTURE = "com.example.e26ch_000.myapplication.action.RESULT_TAKE_PICTURE";
+    /** 動画撮影結果通知Action定義. */
+    public static final String ACTION_RESULT_REC_MOVIE = "com.example.e26ch_000.myapplication.action.RESULT_REC_MOVIE";
+    /** カメラ結果取得用. */
+    private CameraResultReceiver mCameraResultReceiver;
+    /** ダンス実行結果通知用Action定義. */
+    public static final String ACTION_RESULT_DANCE = "com.example.e26ch_000.myapplication.action.RESULT_DANCE";
+    /** ダンス実行結果取得用. */
+    private DanceResultReceiver mDanceResultReceiver;
+    private Handler mHandler = new Handler();
+
+    private ManagedChannel channel;
+    private EditText host_ip;
+    private EditText host_port;
+    private EditText duration;
+    private Button connect_button;
+    private Button disconnect_button;
+    private Thread t;
+
+    private String requestInfo; //Request sent to server
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        Log.v(TAG, "onCreate()");
+        setContentView(R.layout.activity_main);
+
+        //タイトルバー設定.
+        setupTitleBar();
+
+        //ホームボタンの検知登録.
+        mHomeEventReceiver = new HomeEventReceiver();
+        IntentFilter filterHome = new IntentFilter(Intent.ACTION_CLOSE_SYSTEM_DIALOGS);
+        registerReceiver(mHomeEventReceiver, filterHome);
+
+        //VoiceUI再起動の検知登録.
+        mVoiceUIStartReceiver = new VoiceUIStartReceiver();
+        IntentFilter filter = new IntentFilter(VoiceUIManager.ACTION_VOICEUI_SERVICE_STARTED);
+        registerReceiver(mVoiceUIStartReceiver, filter);
+
+        //TODO プロジェクタイベントの検知登録(プロジェクター利用時のみ).
+        //setProjectorEventReceiver();
+
+        //TODO カメラ連携起動結果取得用レシーバー登録(カメラ利用時のみ).
+        //mCameraResultReceiver = new CameraResultReceiver();
+        //IntentFilter filterCamera = new IntentFilter(ACTION_RESULT_TAKE_PICTURE);
+        //filterCamera.addAction(ACTION_RESULT_REC_MOVIE);
+        //filterCamera.addAction(ACTION_RESULT_FACE_DETECTION);
+        //registerReceiver(mCameraResultReceiver, filterCamera);
+
+        //TODO ダンス連携起動結果取得用レシーバー登録(ダンス利用時のみ).
+        //mDanceResultReceiver = new DanceResultReceiver();
+        //IntentFilter filterDance = new IntentFilter(ACTION_RESULT_DANCE);
+        //registerReceiver(mDanceResultReceiver, filterDance);
+
+        host_ip = (EditText)findViewById(R.id.ip);
+        host_port = (EditText)findViewById(R.id.port);
+        duration = (EditText)findViewById(R.id.duration);
+        connect_button = (Button)findViewById(R.id.connect);
+        disconnect_button = (Button)findViewById(R.id.disconnect);
+        disconnect_button.setEnabled(false);
+        requestInfo = "sentence";
+        connect_button.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                String ip = host_ip.getText().toString();
+                String port_str = host_port.getText().toString();
+                int port = Integer.valueOf(port_str);
+                channel = ManagedChannelBuilder.forAddress(ip, port).usePlaintext(true).build();
+                host_ip.setEnabled(false);
+                host_port.setEnabled(false);
+                duration.setEnabled(false);
+                connect_button.setEnabled(false);
+                disconnect_button.setEnabled(true);
+
+                //Thread for asking information from the desktop
+                t = new Thread() {
+                    @Override
+                    public void run() {
+                        try {
+                            while (!t.isInterrupted()) {
+                                Thread.sleep(Integer.valueOf(duration.getText().toString()));
+                                runOnUiThread(new Runnable() {
+                                    @Override
+                                    public void run() {
+                                        String speech = getDesktopInfo(host_ip);
+                                        Log.e(TAG, speech);
+                                        if (mVoiceUIManager != null && !speech.equals("empty")) {
+                                            VoiceUIVariableListHelper helper = new VoiceUIVariableListHelper();
+                                            VoiceUIVariableUtil.setVariableData(mVoiceUIManager, ScenarioDefinitions.MEM_SPEECH, speech);
+                                            helper.addAccost(ScenarioDefinitions.ACC_HELLO);
+                                            VoiceUIManagerUtil.updateAppInfo(mVoiceUIManager, helper.getVariableList(), true);
+                                        }
+                                    }
+                                });
+                            }
+                        } catch (InterruptedException e) {
+                        }
+                    }
+                };
+                t.start();
+
+                /*String speech = getDesktopInfo(v);
+                if (mVoiceUIManager != null) {
+                    VoiceUIVariableListHelper helper = new VoiceUIVariableListHelper();
+                    VoiceUIVariableUtil.setVariableData(mVoiceUIManager,ScenarioDefinitions.MEM_SPEECH, speech);
+                    helper.addAccost(ScenarioDefinitions.ACC_HELLO);
+                    VoiceUIManagerUtil.updateAppInfo(mVoiceUIManager, helper.getVariableList(), true);
+                }*/
+            }
+        });
+
+        disconnect_button.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                t.interrupt();
+                channel.shutdown();
+                disconnect_button.setEnabled(false);
+                host_ip.setEnabled(true);
+                host_port.setEnabled(true);
+                duration.setEnabled(true);
+                connect_button.setEnabled(true);
+            }
+        });
+
+        //発話ボタンの実装.
+        Button Button = (Button) findViewById(R.id.accost);
+        Button.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (mVoiceUIManager != null) {
+                    VoiceUIVariableListHelper helper = new VoiceUIVariableListHelper().addAccost(ScenarioDefinitions.ACC_HELLO);
+                    VoiceUIManagerUtil.updateAppInfo(mVoiceUIManager, helper.getVariableList(), true);
+                }
+            }
+        });
+
+    }
+
+    @Override
+    public void onResume() {
+        super.onResume();
+        Log.v(TAG, "onResume()");
+
+        //VoiceUIManagerのインスタンス取得.
+        if (mVoiceUIManager == null) {
+            mVoiceUIManager = VoiceUIManager.getService(getApplicationContext());
+        }
+        //MainActivityVoiceUIListener生成.
+        if (mMainActivityVoiceUIListener == null) {
+            mMainActivityVoiceUIListener = new MainActivityVoiceUIListener(this);
+        }
+        //VoiceUIListenerの登録.
+        VoiceUIManagerUtil.registerVoiceUIListener(mVoiceUIManager, mMainActivityVoiceUIListener);
+
+        //Scene有効化.
+        VoiceUIManagerUtil.enableScene(mVoiceUIManager, ScenarioDefinitions.SCENE_COMMON);
+        VoiceUIManagerUtil.enableScene(mVoiceUIManager, ScenarioDefinitions.SCENE01);
+    }
+
+    @Override
+    public void onPause() {
+        super.onPause();
+        Log.v(TAG, "onPause()");
+
+        //バックに回ったら発話を中止する.
+        VoiceUIManagerUtil.stopSpeech();
+
+        //VoiceUIListenerの解除.
+        VoiceUIManagerUtil.unregisterVoiceUIListener(mVoiceUIManager, mMainActivityVoiceUIListener);
+
+        //Scene無効化.
+        VoiceUIManagerUtil.disableScene(mVoiceUIManager, ScenarioDefinitions.SCENE_COMMON);
+        VoiceUIManagerUtil.disableScene(mVoiceUIManager, ScenarioDefinitions.SCENE01);
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        Log.v(TAG, "onDestroy()");
+
+        //ホームボタンの検知破棄.
+        this.unregisterReceiver(mHomeEventReceiver);
+
+        //VoiceUI再起動の検知破棄.
+        this.unregisterReceiver(mVoiceUIStartReceiver);
+
+        //TODO プロジェクタイベントの検知破棄(プロジェクター利用時のみ).
+        //this.unregisterReceiver(mProjectorEventReceiver);
+
+        //TODO カメラ連携起動結果取得用レシーバー破棄(カメラ利用時のみ).
+        //this.unregisterReceiver(mCameraResultReceiver);
+
+        //TODO ダンス結果用レシーバーの破棄(ダンス利用時のみ).
+        //this.unregisterReceiver(mDanceResultReceiver);
+
+        //インスタンスのごみ掃除.
+        mVoiceUIManager = null;
+        mMainActivityVoiceUIListener = null;
+        mProjectorEventReceiver = null;
+    }
+
+    /**
+     * VoiceUIListenerクラスからのコールバックを実装する.
+     */
+
+    @Override
+    public void onExecCommand(String command, List<VoiceUIVariable> variables) {
+        Log.v(TAG, "onExecCommand() : " + command);
+
+        switch (command) {
+            case ScenarioDefinitions.FUNC_END_APP:
+                finish();
+                break;
+            case ScenarioDefinitions.FUNC_START_PROJECTOR:
+                //TODO プロジェクタマネージャの開始(プロジェクター利用時のみ).
+                //if(!isProjected) {
+                //    startService(getIntentForProjector());
+                //}
+                break;
+            case ScenarioDefinitions.FUNC_FINISH_SAY:
+                //Return "Finish" to server
+                requestInfo = "Finish";
+                break;
+            case "speechRecog":
+                Log.d(TAG, "Speech Detected!");
+
+                final String lvcsr = VoiceUIVariableUtil.getVariableData(variables, "Lvcsr_BasicText");
+                boolean post = mHandler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        String robohon;
+                        VoiceUIVariableListHelper helper = new VoiceUIVariableListHelper();
+
+                        ///閉嘴機制 需靜音功能 未完成
+                        if (lvcsr.contains("不要说话")) {
+                            robohon = "好";
+                            VoiceUIVariableUtil.setVariableData(mVoiceUIManager, ScenarioDefinitions.MEM_SPEECH, robohon);
+                            helper.addAccost(ScenarioDefinitions.ACC_HELLO);
+                            VoiceUIManagerUtil.updateAppInfo(mVoiceUIManager, helper.getVariableList(), true);
+                        }
+
+                        ///確認身分
+                        if (lvcsr.contains("你好")) {
+                            requestInfo = "face";///face recognition
+                            String name = getDesktopInfo(host_ip);
+                            robohon = "嗨我是RoBoHon，請問你是不是";
+                            VoiceUIVariableUtil.setVariableData(mVoiceUIManager, ScenarioDefinitions.MEM_SPEECH, robohon+name);
+                            helper.addAccost(ScenarioDefinitions.ACC_HELLO);
+                            VoiceUIManagerUtil.updateAppInfo(mVoiceUIManager, helper.getVariableList(), true);
+                        }
+                        if (lvcsr.contains("我是")) {
+                            robohon = "你還好嗎，是哪裏不舒服或受傷了嗎";
+                            VoiceUIVariableUtil.setVariableData(mVoiceUIManager, ScenarioDefinitions.MEM_SPEECH, robohon);
+                            helper.addAccost(ScenarioDefinitions.ACC_HELLO);
+                            VoiceUIManagerUtil.updateAppInfo(mVoiceUIManager, helper.getVariableList(), true);
+                        }
+                        else if (lvcsr.contains("我不是")) {
+                            requestInfo="incorrect";
+                            robohon = "對不起，我認錯人了，可以請你告訴我你的學號嗎？";
+                            VoiceUIVariableUtil.setVariableData(mVoiceUIManager, ScenarioDefinitions.MEM_SPEECH, robohon);
+                            helper.addAccost(ScenarioDefinitions.ACC_HELLO);
+                            VoiceUIManagerUtil.updateAppInfo(mVoiceUIManager, helper.getVariableList(), true);
+                            requestInfo=robohon;
+                        }
+                        if(lvcsr.contains("一零")){
+                            requestInfo=lvcsr;
+                            robohon = "你還好嗎，是哪裏不舒服或受傷了嗎";
+                            VoiceUIVariableUtil.setVariableData(mVoiceUIManager, ScenarioDefinitions.MEM_SPEECH, robohon);
+                            helper.addAccost(ScenarioDefinitions.ACC_HELLO);
+                            VoiceUIManagerUtil.updateAppInfo(mVoiceUIManager, helper.getVariableList(), true);
+                        }
+
+                        ///判斷是不舒服或受傷
+                        if (lvcsr.contains("不舒服")) {
+                            robohon = "是肌肉痠痛、拉傷、扭傷或怎麼了嗎？";
+                            VoiceUIVariableUtil.setVariableData(mVoiceUIManager, ScenarioDefinitions.MEM_SPEECH, robohon);
+                            helper.addAccost(ScenarioDefinitions.ACC_HELLO);
+                            VoiceUIManagerUtil.updateAppInfo(mVoiceUIManager, helper.getVariableList(), true);
+                        }
+                        else if (lvcsr.contains("受伤")) {
+                            robohon = "你哪裏受傷了，給我看看好嗎？";
+                            VoiceUIVariableUtil.setVariableData(mVoiceUIManager, ScenarioDefinitions.MEM_SPEECH, robohon);
+                            helper.addAccost(ScenarioDefinitions.ACC_HELLO);
+                            VoiceUIManagerUtil.updateAppInfo(mVoiceUIManager, helper.getVariableList(), true);
+                            requestInfo="woundpredict";
+                            flag=false;
+                        }
+
+                        ///處理不舒服者
+                        if (lvcsr.contains("肌肉酸痛")) {
+                            requestInfo="肌肉痠痛";
+                            robohon = "請你伸展酸痛部位。也可以拍打、按、熱敷，或者噴肌樂、貼肌貼。貼布和肌樂都在門邊的檯子上。下次運動前要熱身，不要過度運動喔。";
+                            VoiceUIVariableUtil.setVariableData(mVoiceUIManager, ScenarioDefinitions.MEM_SPEECH, robohon);
+                            helper.addAccost(ScenarioDefinitions.ACC_HELLO);
+                            VoiceUIManagerUtil.updateAppInfo(mVoiceUIManager, helper.getVariableList(), true);
+                        }
+                        else if(lvcsr.contains("抽筋")){
+                            requestInfo="抽筋";
+                            robohon="請你對抽筋肌肉均勻施壓。持續緩慢拉長讓它放鬆。若是小腿抽筋，請將腿打直，腳尖朝上。使腳掌和腳尖呈直角。若有同學協助處理，同學需往傷者身體方向推腳掌。沒有的就自己往身體方向輕拉。若是大腿抽筋，請托住腳跟往後拉，使膝蓋朝下，把筋拉開。要注意下次運動前要熱身，不要過分疲勞，記得適當補充鹽分。也不要穿戴太緊。";
+                            VoiceUIVariableUtil.setVariableData(mVoiceUIManager, ScenarioDefinitions.MEM_SPEECH, robohon);
+                            helper.addAccost(ScenarioDefinitions.ACC_HELLO);
+                            VoiceUIManagerUtil.updateAppInfo(mVoiceUIManager, helper.getVariableList(), true);
+                        }
+                        if (lvcsr.contains("拉伤")) {
+                            requestInfo="拉傷";
+                            robohon = "那請你去冰敷，每次15至20分鐘，休息10至20分鐘，冰袋在冰箱裡。間歇冰敷1至2天後改為熱敷、貼肌貼。下次運動前要記得熱身喔。";
+                            VoiceUIVariableUtil.setVariableData(mVoiceUIManager, ScenarioDefinitions.MEM_SPEECH, robohon);
+                            helper.addAccost(ScenarioDefinitions.ACC_HELLO);
+                            VoiceUIManagerUtil.updateAppInfo(mVoiceUIManager, helper.getVariableList(), true);
+                        }
+                        else if(lvcsr.contains("扭")||lvcsr.contains("拐")){
+                            requestInfo="扭傷";
+                            robohon="請你去冰敷，每次15至20分鐘，休息10至20分鐘，冰袋在冰箱裡。如果沒有繼續出血或腫脹，在間歇冰敷1至3天後改為熱敷、泡熱水或按摩。嚴重的話，用彈性繃帶固定患部。要注意有脫臼或骨折，就需要就醫了。下次運動前要記得熱身，走路小心點。" ;
+                            VoiceUIVariableUtil.setVariableData(mVoiceUIManager, ScenarioDefinitions.MEM_SPEECH, robohon);
+                            helper.addAccost(ScenarioDefinitions.ACC_HELLO);
+                            VoiceUIManagerUtil.updateAppInfo(mVoiceUIManager, helper.getVariableList(), true);
+                        }
+                        else if(lvcsr.contains("头晕")){
+                            requestInfo="頭暈";
+                            robohon="那你去找護理師，或問他能否在此臥床休息！";
+                            VoiceUIVariableUtil.setVariableData(mVoiceUIManager, ScenarioDefinitions.MEM_SPEECH, robohon);
+                            helper.addAccost(ScenarioDefinitions.ACC_HELLO);
+                            VoiceUIManagerUtil.updateAppInfo(mVoiceUIManager, helper.getVariableList(), true);
+                        }
+                        else if(lvcsr.contains("肚子痛")){
+                            requestInfo="肚子痛";
+                            robohon="那你去找護理師，或問他能否在此臥床休息！";
+                            VoiceUIVariableUtil.setVariableData(mVoiceUIManager, ScenarioDefinitions.MEM_SPEECH, robohon);
+                            helper.addAccost(ScenarioDefinitions.ACC_HELLO);
+                            VoiceUIManagerUtil.updateAppInfo(mVoiceUIManager, helper.getVariableList(), true);
+                        }
+                        else if(lvcsr.contains("头痛")){
+                            requestInfo="頭痛";
+                            robohon="那你去找護理師，或問他能否在此臥床休息！";
+                            VoiceUIVariableUtil.setVariableData(mVoiceUIManager, ScenarioDefinitions.MEM_SPEECH, robohon);
+                            helper.addAccost(ScenarioDefinitions.ACC_HELLO);
+                            VoiceUIManagerUtil.updateAppInfo(mVoiceUIManager, helper.getVariableList(), true);
+                        }
+
+                        ///傷口辨識
+                        if(flag) {
+                            String wound=getDesktopInfo(host_ip);
+                            String y="對吧？";
+                            robohon = "那你受的是";
+                            VoiceUIVariableUtil.setVariableData(mVoiceUIManager, ScenarioDefinitions.MEM_SPEECH, robohon+wound+y);
+                            helper.addAccost(ScenarioDefinitions.ACC_HELLO);
+                            VoiceUIManagerUtil.updateAppInfo(mVoiceUIManager, helper.getVariableList(), true);
+
+                            ///比對傷口辨識結果
+                            if(lvcsr.contains("对")){
+                                tf=true;
+                            }
+                            else if(lvcsr.contains("不对")){
+                                robohon="那請問你是受甚麼傷呢？";
+                                VoiceUIVariableUtil.setVariableData(mVoiceUIManager, ScenarioDefinitions.MEM_SPEECH, robohon);
+                                helper.addAccost(ScenarioDefinitions.ACC_HELLO);
+                                VoiceUIManagerUtil.updateAppInfo(mVoiceUIManager, helper.getVariableList(), true);
+                                requestInfo="wincorrect";
+                            }
+
+                            ///口頭詢問傷口種類
+                            if(lvcsr.contains("割")||(wound.equals("割裂傷")&&tf)){
+                                robohon="請妳直接按壓割傷處止血。之後用清水或生理食鹽水清洗傷口。再用優碘消毒。擦藥後用繃帶包紮。如果血流不止、持續疼痛，就需要就醫了。";
+                                VoiceUIVariableUtil.setVariableData(mVoiceUIManager, ScenarioDefinitions.MEM_SPEECH, robohon);
+                                helper.addAccost(ScenarioDefinitions.ACC_HELLO);
+                                VoiceUIManagerUtil.updateAppInfo(mVoiceUIManager, helper.getVariableList(), true);
+                                requestInfo="割裂傷";
+                            }
+                            else if(lvcsr.contains("擦")||(wound.equals("擦傷")&&tf)){
+                                robohon="請妳直接按壓擦傷處止血。之後用清水或生理食鹽水清理傷口。再用優碘消毒，擦藥後用繃帶和紗布包紮。如果血流不止、持續疼痛，就需要就醫了。";
+                                VoiceUIVariableUtil.setVariableData(mVoiceUIManager, ScenarioDefinitions.MEM_SPEECH, robohon);
+                                helper.addAccost(ScenarioDefinitions.ACC_HELLO);
+                                VoiceUIManagerUtil.updateAppInfo(mVoiceUIManager, helper.getVariableList(), true);
+                                requestInfo="擦傷";
+                            }
+                            else if (lvcsr.contains("瘀青")||(wound.equals("瘀青")&&tf)) {
+                                robohon = "請妳去冰敷，每次15至20分鐘，休息10至20分鐘，冰袋在門邊的冰箱裡。間歇冰敷24小時後改為熱敷。要注意不可以用手搓揉瘀青的地方。如果有嚴重內傷的可能，就需要就醫了。";
+                                VoiceUIVariableUtil.setVariableData(mVoiceUIManager, ScenarioDefinitions.MEM_SPEECH, robohon);
+                                helper.addAccost(ScenarioDefinitions.ACC_HELLO);
+                                VoiceUIManagerUtil.updateAppInfo(mVoiceUIManager, helper.getVariableList(), true);
+                                requestInfo="瘀青";
+                            }
+                            else if(lvcsr.contains("抓")||(wound.equals("抓傷")&&tf)){
+                                robohon="如果是被動物抓傷，請你用清水或肥皂水清理傷口至少20分鐘，再用2至3%碘酒或75%酒精消毒。擦完藥用繃帶和紗布包紮。記得一定要到醫院注射狂犬疫苗喔。如果是普通抓傷，請妳去冰敷，冰袋在門邊的冰箱裡。並用水清洗傷口，再用優碘消毒。擦藥後用繃帶包起來。";
+                                VoiceUIVariableUtil.setVariableData(mVoiceUIManager, ScenarioDefinitions.MEM_SPEECH, robohon);
+                                helper.addAccost(ScenarioDefinitions.ACC_HELLO);
+                                VoiceUIManagerUtil.updateAppInfo(mVoiceUIManager, helper.getVariableList(), true);
+                                requestInfo="抓傷";
+                            }
+                        }
+
+                        ///結語
+                        if(lvcsr.contains("好"))
+                        {
+                            robohon="祝你早日康復，goodbye。";
+                            VoiceUIVariableUtil.setVariableData(mVoiceUIManager, ScenarioDefinitions.MEM_SPEECH, robohon);
+                            helper.addAccost(ScenarioDefinitions.ACC_HELLO);
+                            VoiceUIManagerUtil.updateAppInfo(mVoiceUIManager, helper.getVariableList(), true);
+                            tf=false;
+
+                        }
+                    }
+                });
+                break;
+            default:
+                break;
+        }
+    }
+    /**
+     * ホームボタンの押下イベントを受け取るためのBroadcastレシーバークラス.<br>
+     * <p/>
+     * アプリは必ずホームボタンで終了する..
+     */
+    private class HomeEventReceiver extends BroadcastReceiver {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            Log.v(TAG, "Receive Home button pressed");
+            // ホームボタン押下でアプリ終了する.
+            finish();
+        }
+    }
+
+    /**
+     * 音声UI再起動イベントを受け取るためのBroadcastレシーバークラス.<br>
+     * <p/>
+     * 稀に音声UIのServiceが再起動することがあり、その場合アプリはVoiceUIの再取得とListenerの再登録をする.
+     */
+    private class VoiceUIStartReceiver extends BroadcastReceiver {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            String action = intent.getAction();
+            if (VoiceUIManager.ACTION_VOICEUI_SERVICE_STARTED.equals(action)) {
+                Log.d(TAG, "VoiceUIStartReceiver#onReceive():VOICEUI_SERVICE_STARTED");
+                //VoiceUIManagerのインスタンス取得.
+                mVoiceUIManager = VoiceUIManager.getService(getApplicationContext());
+                if (mMainActivityVoiceUIListener == null) {
+                    mMainActivityVoiceUIListener = new MainActivityVoiceUIListener(getApplicationContext());
+                }
+                //VoiceUIListenerの登録.
+                VoiceUIManagerUtil.registerVoiceUIListener(mVoiceUIManager, mMainActivityVoiceUIListener);
+            }
+        }
+    }
+
+    /**
+     * プロジェクターの状態変化時のイベントを受け取るためのBroadcastレシーバークラス.<br>
+     * <p/>
+     * 照射開始時にはWakeLockの取得、終了時にはWakeLockの開放する.<br>
+     * アプリ仕様に応じて必要な処理があれば実装すること.
+     */
+    private class ProjectorEventReceiver extends BroadcastReceiver {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            Log.v(TAG, "ProjectorEventReceiver#onReceive():" + intent.getAction());
+            switch(intent.getAction()){
+                case ProjectorManagerServiceUtil.ACTION_PROJECTOR_PREPARE:
+                case ProjectorManagerServiceUtil.ACTION_PROJECTOR_PAUSE:
+                case ProjectorManagerServiceUtil.ACTION_PROJECTOR_RESUME:
+                    break;
+                case ProjectorManagerServiceUtil.ACTION_PROJECTOR_START:
+                    acquireWakeLock();
+                    isProjected = true;
+                    break;
+                case ProjectorManagerServiceUtil.ACTION_PROJECTOR_END:
+                case ProjectorManagerServiceUtil.ACTION_PROJECTOR_END_FATAL_ERROR:
+                case ProjectorManagerServiceUtil.ACTION_PROJECTOR_END_ERROR:
+                case ProjectorManagerServiceUtil.ACTION_PROJECTOR_TERMINATE:
+                    releaseWakeLock();
+                    isProjected = false;
+                    break;
+                default:
+                    break;
+            }
+        }
+    }
+
+    /** タイトルバーを設定する.*/
+    private void setupTitleBar() {
+        Toolbar toolbar = (Toolbar) findViewById(R.id.toolbar);
+        setActionBar(toolbar);
+    }
+
+    /** プロジェクターマネージャーの開始/停止用のIntentを設定する. */
+    private Intent getIntentForProjector() {
+        Intent intent = new Intent();
+        ComponentName componentName = new ComponentName(
+                ProjectorManagerServiceUtil.PACKAGE_NAME,
+                ProjectorManagerServiceUtil.CLASS_NAME);
+        //逆方向で照射する
+        intent.putExtra(ProjectorManagerServiceUtil.EXTRA_PROJECTOR_OUTPUT, ProjectorManagerServiceUtil.EXTRA_PROJECTOR_OUTPUT_VAL_REVERSE);
+        //足元に照射する
+        intent.putExtra(ProjectorManagerServiceUtil.EXTRA_PROJECTOR_DIRECTION, ProjectorManagerServiceUtil.EXTRA_PROJECTOR_DIRECTION_VAL_UNDER);
+        intent.setComponent(componentName);
+        return intent;
+    }
+
+    /** プロジェクターの状態変化イベントを受け取るためのレシーバーをセットする. */
+    private void setProjectorEventReceiver() {
+        Log.v(TAG, "setProjectorEventReceiver()");
+        if (mProjectorEventReceiver == null) {
+            mProjectorEventReceiver = new ProjectorEventReceiver();
+        } else {
+            return;
+        }
+        IntentFilter intentFilter = new IntentFilter();
+        intentFilter.addAction(ProjectorManagerServiceUtil.ACTION_PROJECTOR_PREPARE);
+        intentFilter.addAction(ProjectorManagerServiceUtil.ACTION_PROJECTOR_START);
+        intentFilter.addAction(ProjectorManagerServiceUtil.ACTION_PROJECTOR_PAUSE);
+        intentFilter.addAction(ProjectorManagerServiceUtil.ACTION_PROJECTOR_RESUME);
+        intentFilter.addAction(ProjectorManagerServiceUtil.ACTION_PROJECTOR_END);
+        intentFilter.addAction(ProjectorManagerServiceUtil.ACTION_PROJECTOR_END_ERROR);
+        intentFilter.addAction(ProjectorManagerServiceUtil.ACTION_PROJECTOR_END_FATAL_ERROR);
+        intentFilter.addAction(ProjectorManagerServiceUtil.ACTION_PROJECTOR_TERMINATE);
+        registerReceiver(mProjectorEventReceiver, intentFilter);
+    }
+
+    /** WakeLockを取得する. */
+    private void acquireWakeLock() {
+        Log.v(TAG, "acquireWakeLock()");
+        PowerManager pm = (PowerManager) getApplicationContext().getSystemService(Context.POWER_SERVICE);
+        synchronized (mLock) {
+            if (mWakelock == null || !mWakelock.isHeld()) {
+                mWakelock = pm.newWakeLock(PowerManager.SCREEN_DIM_WAKE_LOCK
+                        | PowerManager.ACQUIRE_CAUSES_WAKEUP
+                        | PowerManager.ON_AFTER_RELEASE, MainActivity.class.getName());
+                mWakelock.acquire();
+            }
+        }
+    }
+
+    /** WakeLockを開放する. */
+    private void releaseWakeLock() {
+        Log.v(TAG, "releaseWakeLock()");
+        synchronized (mLock) {
+            if (mWakelock != null && mWakelock.isHeld()) {
+                mWakelock.release();
+                mWakelock = null;
+            }
+        }
+    }
+
+    /**
+     * カメラ連携の結果を受け取るためのBroadcastレシーバー クラス.<br>
+     * <p/>
+     * それぞれの結果毎に処理を行う.
+     */
+    private class CameraResultReceiver extends BroadcastReceiver {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            String action = intent.getAction();
+            Log.d(TAG, "CameraResultReceiver#onReceive() : " + action);
+            switch(action){
+                case ACTION_RESULT_FACE_DETECTION:
+                    int result = intent.getIntExtra(FaceDetectionUtil.EXTRA_RESULT_CODE, FaceDetectionUtil.RESULT_CANCELED);
+                    break;
+                case ACTION_RESULT_TAKE_PICTURE:
+                    result = intent.getIntExtra(ShootMediaUtil.EXTRA_RESULT_CODE, ShootMediaUtil.RESULT_CANCELED);
+                    break;
+                case ACTION_RESULT_REC_MOVIE:
+                    result = intent.getIntExtra(ShootMediaUtil.EXTRA_RESULT_CODE, ShootMediaUtil.RESULT_CANCELED);
+                    break;
+                default:
+                    break;
+            }
+        }
+    }
+
+    /**
+     * 顔検出実行用インテント取得関数
+     * @param swing String型でTRUE or FALSE
+     * @return 顔検出実行用intent
+     */
+    private Intent getIntentForFaceDetection(String swing) {
+        Intent intent = new Intent(FaceDetectionUtil.ACTION_FACE_DETECTION_MODE);
+        intent.setPackage(FaceDetectionUtil.PACKAGE);
+        intent.putExtra(FaceDetectionUtil.EXTRA_REPLYTO_ACTION, ACTION_RESULT_FACE_DETECTION);
+        intent.putExtra(FaceDetectionUtil.EXTRA_REPLYTO_PKG, getPackageName());
+        intent.putExtra(FaceDetectionUtil.EXTRA_FACE_DETECTION_LENGTH, FaceDetectionUtil.EXTRA_FACE_DETECTION_LENGTH_NORMAL);
+        intent.putExtra(FaceDetectionUtil.EXTRA_MOVE_HEAD, swing);
+        return intent;
+    }
+
+    /**
+     * 写真撮影実行用インテント取得関数
+     * @param facedetect boolean型
+     * @return 写真撮影実行用intent
+     */
+    private Intent getIntentForPhoto(boolean facedetect) {
+        Intent intent = new Intent(ShootMediaUtil.ACTION_SHOOT_IMAGE);
+        intent.setPackage(ShootMediaUtil.PACKAGE);
+        intent.putExtra(ShootMediaUtil.EXTRA_FACE_DETECTION, facedetect);
+        intent.putExtra(ShootMediaUtil.EXTRA_REPLYTO_ACTION, ACTION_RESULT_TAKE_PICTURE);
+        intent.putExtra(ShootMediaUtil.EXTRA_REPLYTO_PKG, getPackageName());
+        //TODO 撮影対象指定する場合はContactIDを指定
+        //intent.putExtra(ShootMediaUtil.EXTRA_CONTACTID, ShootMediaUtil.EXTRA_CONTACTID_OWNER);
+        return intent;
+    }
+
+    /**
+     * 動画撮影実行用インテント取得関数
+     * @param time int型(sec)
+     * @return 動画撮影実行用intent
+     */
+    private Intent getIntentForVideo(int time) {
+        Intent intent = new Intent(ShootMediaUtil.ACTION_SHOOT_MOVIE);
+        intent.setPackage(ShootMediaUtil.PACKAGE);
+        intent.putExtra(ShootMediaUtil.EXTRA_MOVIE_LENGTH, time);
+        intent.putExtra(ShootMediaUtil.EXTRA_REPLYTO_ACTION, ACTION_RESULT_REC_MOVIE);
+        intent.putExtra(ShootMediaUtil.EXTRA_REPLYTO_PKG, getPackageName());
+        return intent;
+    }
+
+    /**
+     * ダンス実行結果を受け取るためのBroadcastレシーバー クラス.<br>
+     * <p/>
+     */
+    private class DanceResultReceiver extends BroadcastReceiver {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            int result = intent.getIntExtra(DanceUtil.EXTRA_RESULT_CODE, DanceUtil.RESULT_CANCELED);
+            if (result == DanceUtil.RESULT_OK) {
+                // 正常に完了した場合.
+                int id = intent.getIntExtra(DanceUtil.EXTRA_RESULT_ID, -1);
+            }
+        }
+    }
+
+    /**
+     * ダンス開始用のIntentを設定する.
+     */
+    private Intent getIntentForDance(String type) {
+        Intent intent = new Intent(DanceUtil.ACTION_REQUEST_DANCE);
+        intent.putExtra(DanceUtil.EXTRA_REPLYTO_ACTION, ACTION_RESULT_DANCE);
+        intent.putExtra(DanceUtil.EXTRA_REPLYTO_PKG, getPackageName());
+        intent.putExtra(DanceUtil.EXTRA_TYPE, type);
+        if(type.equals(DanceUtil.EXTRA_TYPE_ASSIGN)) {
+            intent.putExtra(DanceUtil.EXTRA_REQUEST_ID, 1);
+        }
+        return intent;
+    }
+
+    private interface GrpcRunnable {
+        /** Perform a grpcRunnable and return all the logs. */
+        String run(RoBoHoNMessageGrpc.RoBoHoNMessageBlockingStub blockingStub, RoBoHoNMessageGrpc.RoBoHoNMessageStub asyncStub) throws Exception;
+    }
+
+    private static class GrpcTask extends AsyncTask<Void, Void, String> {
+        private final GrpcRunnable grpcRunnable;
+        private final ManagedChannel channel;
+        private final WeakReference<MainActivity> activityReference;
+
+        GrpcTask(GrpcRunnable grpcRunnable, ManagedChannel channel, MainActivity activity) {
+            this.grpcRunnable = grpcRunnable;
+            this.channel = channel;
+            this.activityReference = new WeakReference<>(activity);
+        }
+
+        protected String waitForServer() {
+            try {
+                String info = grpcRunnable.run(RoBoHoNMessageGrpc.newBlockingStub(channel), RoBoHoNMessageGrpc.newStub(channel));
+                Log.println(Log.INFO, "Result", "Success!\n" + info);
+                return info;
+            } catch (Exception e) {
+                StringWriter sw = new StringWriter();
+                PrintWriter pw = new PrintWriter(sw);
+                e.printStackTrace(pw);
+                pw.flush();
+                Log.println(Log.INFO, "Result", "Failed... :\n" + sw);
+                return " ";
+            }
+        }
+
+        @Override
+        protected String doInBackground(Void... nothing) {
+            try {
+                String info = grpcRunnable.run(RoBoHoNMessageGrpc.newBlockingStub(channel), RoBoHoNMessageGrpc.newStub(channel));
+                Log.println(Log.INFO, "Result", "Success!\n" + info);
+                return "Success!\n" + info;
+            } catch (Exception e) {
+                StringWriter sw = new StringWriter();
+                PrintWriter pw = new PrintWriter(sw);
+                e.printStackTrace(pw);
+                pw.flush();
+                Log.println(Log.INFO, "Result", "Failed... :\n" + sw);
+                return "Failed... :\n" + sw;
+            }
+        }
+
+        @Override
+        protected void onPostExecute(String result) {
+            MainActivity activity = activityReference.get();
+            if (activity == null) {
+                return;
+            }
+        }
+    }
+
+    //Change to non-static function
+    private class GetDesktopInfoRunnable implements GrpcRunnable {
+        @Override
+        public String run(RoBoHoNMessageGrpc.RoBoHoNMessageBlockingStub blockingStub, RoBoHoNMessageGrpc.RoBoHoNMessageStub asyncStub)
+                throws Exception {
+            return execMotion(blockingStub);
+        }
+
+        /** Blocking unary call example. Calls getFeature and prints the response. */
+        private String execMotion(RoBoHoNMessageGrpc.RoBoHoNMessageBlockingStub blockingStub)
+                throws StatusRuntimeException {
+            robohon request = robohon.newBuilder().setInfoType(requestInfo).build();
+            if (requestInfo.equals("Finish")) {
+                requestInfo = "Sentence";
+            }
+            desktop info = blockingStub.requestInfo(request);
+            //Return the information requested
+            return info.getSentence();
+        }
+    }
+
+    private String getDesktopInfo(View view) {
+        //new GrpcTask(new GetDesktopInfoRunnable(), channel, this).execute();
+        return new GrpcTask(new GetDesktopInfoRunnable(), channel, this).waitForServer();
+    }
+
+}
+

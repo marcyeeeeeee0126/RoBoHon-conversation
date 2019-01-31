@@ -363,7 +363,7 @@ public class MainActivity extends Activity implements MainActivityVoiceUIListene
                         ///處理不舒服者
                         if (lvcsr.contains("肌肉酸痛")) {
                             requestInfo="肌肉痠痛";
-                            robohon = "請你伸展酸痛部位。也可以拍打、按、熱敷，或者噴肌垃、貼肌貼。貼布和肌垃都在門邊的檯子上。下次運動前要熱身，不要過度運動喔。";
+                            robohon = "請你伸展酸痛部位。也可以拍打、按、熱敷，或者噴肌熱、貼肌貼。貼布和肌熱都在門邊的檯子上。下次運動前要熱身，不要過度運動喔。";
                             VoiceUIVariableUtil.setVariableData(mVoiceUIManager, ScenarioDefinitions.MEM_SPEECH, robohon);
                             helper.addAccost(ScenarioDefinitions.ACC_HELLO);
                             VoiceUIManagerUtil.updateAppInfo(mVoiceUIManager, helper.getVariableList(), true);
